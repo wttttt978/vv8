@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>SBS 180 Gyro VR Player</title>
+<style>
+  :root{
+    --bg:#0a0a0c;
+    --panel:#141418;
+    --line:#26262c;
+    --text:#e9e9ee;
+    --dim:#8a8a94;
+    --accent:#5fb3a3;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;
+    overflow:hidden;}
+
+  #start{
+    height:100%; display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:22px; padding:24px; text-align:center;
+  }
+  #start h1{font-size:17px; font-weight:600; margin:0; letter-spacing:.02em;}
+  #start p{font-size:13px; color:var(--dim); margin:0; line-height:1.6; max-width:320px;}
+
+  .file-btn{
+    position:relative; overflow:hidden;
+    background:var(--panel); border:1px solid var(--line); color:var(--text);
+    padding:14px 22px; border-radius:10px; font-size:14px; cursor:pointer;
+  }
+  .file-btn input{
+    position:absolute; inset:0; opacity:0; cursor:pointer; width:100%; height:100%;
+  }
+  #filename{font-size:12px; color:var(--accent); min-height:16px;}
+
+  #enter{
+    background:var(--accent); color:#06231d; border:none; padding:14px 30px;
+    border-radius:10px; font-size:14px; font-weight:600; cursor:pointer;
+    opacity:.4; pointer-events:none;
+  }
+  #enter.ready{opacity:1; pointer-events:auto;}
+
+  #stage{position:fixed; inset:0; display:none; background:#000;}
+  #stage video{display:none;}
+  canvas{display:block; width:100%; height:100%;}
+
+  #hud{
+    position:fixed; top:0; left:0; right:0; padding:14px 16px;
+    display:flex; justify-content:flex-end; align-items:center;
+    z-index:5; pointer-events:none;
+  }
+  #hud button{pointer-events:auto; background:rgba(0,0,0,.5); border:1px solid rgba(255,255,255,.25);
+    color:#fff; border-radius:8px; padding:8px 12px; font-size:12px;}
+
+  /* 画面中央(左目・右目それぞれ)に出す照準点。メニュー表示中のみ見せる */
+  .reticle{
+    position:fixed; top:50%; width:10px; height:10px; margin:-5px 0 0 -5px;
+    border:2px solid rgba(255,255,255,.85); border-radius:50%;
+    z-index:6; pointer-events:none; opacity:0; transition:opacity .15s;
+  }
+  .reticle.show{opacity:1;}
+  #reticleL{left:25%;}
+  #reticleR{left:75%;}
+
+  #hint{
+    position:fixed; left:50%; top:14%; transform:translateX(-50%);
+    font-size:12px; color:#fff; background:rgba(0,0,0,.5); padding:8px 14px;
+    border-radius:20px; z-index:6; opacity:0; transition:opacity .6s; pointer-events:none;
+    white-space:nowrap;
+  }
+  #hint.show{opacity:1;}
+
+  #err{position:fixed; bottom:20px; left:16px; right:16px; background:#2a1414; border:1px solid #6b2c2c;
+    color:#ffb4b4; padding:10px 12px; border-radius:8px; font-size:12px; display:none; z-index:6;}
+</style>
+</head>
+<body>
+
+<div id="start">
+  <div>
+    <h1>SBS 180° ジャイロプレーヤー</h1>
+    <p>VR180形式(左右分割・半球)の動画を選んで、ジャイロで見渡せます。<br>
+    再生中に頭を素早く左右に振るとメニューが出ます。<br>
+    ボタンやバーをしばらく見つめる(注視)と選択されます。<br>
+    正面がズレたら、メニュー内の⟲アイコンを見つめてください。3・2・1のカウントダウン後に再設定されます。</p>
+  </div>
+
+  <label class="file-btn">
+    動画ファイルを選択
+    <input type="file" id="fileInput" accept="video/*">
+  </label>
+  <div id="filename"></div>
+
+  <button id="enter">ジャイロを許可してVR再生</button>
+  <div id="err"></div>
+</div>
+
+<div id="stage">
+  <video id="video" playsinline webkit-playsinline crossorigin="anonymous" loop></video>
+  <div id="hud">
+    <button id="exitBtn">戻る</button>
+  </div>
+  <div id="hint">頭を素早く左右に振るとメニューが出ます</div>
+  <div class="reticle" id="reticleL"></div>
+  <div class="reticle" id="reticleR"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+  const startEl = document.getElementById('start');
+  const stageEl = document.getElementById('stage');
+  const fileInput = document.getElementById('fileInput');
+  const filenameEl = document.getElementById('filename');
+  const enterBtn = document.getElementById('enter');
+  const exitBtn = document.getElementById('exitBtn');
+  const errEl = document.getElementById('err');
+  const video = document.getElementById('video');
+  const hintEl = document.getElementById('hint');
+  const reticleL = document.getElementById('reticleL');
+  const reticleR = document.getElementById('reticleR');
+  const HINT_DEFAULT = hintEl.textContent;
+
+  function showHint(msg, duration){
+    hintEl.textContent = msg;
+    hintEl.classList.add('show');
+    clearTimeout(showHint._t);
+    showHint._t = setTimeout(()=>{
+      hintEl.classList.remove('show');
+      hintEl.textContent = HINT_DEFAULT;
+    }, duration || 1500);
+  }
+
+  let fileReady = false;
+
+  function showError(msg){
+    errEl.textContent = msg;
+    errEl.style.display = 'block';
+  }
+
+  fileInput.addEventListener('change', (e)=>{
+    const f = e.target.files[0];
+    if(!f) return;
+    const url = URL.createObjectURL(f);
+    video.src = url;
+    filenameEl.textContent = f.name;
+    fileReady = true;
+    enterBtn.classList.add('ready');
+  });
+
+  // ---------- three.js セットアップ ----------
+  let renderer, scene, cameraGroup, cameraL, cameraR;
+  let texL, texR;
+  let running = false;
+
+  // メニュー関連
+  const MENU_DIST = 2.2, MENU_W = 1.7, MENU_H = 0.95;
+  const CANVAS_W = 1024, CANVAS_H = 576;
+  const DWELL_MS = 650;
+  const RECENTER_COUNTDOWN_MS = 3000; // 再設定を選択してから正面を決めるまでの待ち時間
+  let menuGroup, menuCanvas, menuCtx, menuTexture, hitPlane;
+  let hoverRegion = null, hoverStart = 0, hoverFrac = 0;
+
+  function buildScene(){
+    scene = new THREE.Scene();
+
+    cameraGroup = new THREE.Object3D();
+    scene.add(cameraGroup);
+
+    cameraL = new THREE.PerspectiveCamera(100, 1, 0.1, 1000);
+    cameraR = new THREE.PerspectiveCamera(100, 1, 0.1, 1000);
+    cameraL.layers.set(1);
+    cameraR.layers.set(2);
+    cameraGroup.add(cameraL);
+    cameraGroup.add(cameraR);
+
+    // 正面を中心にした半球(横180度・縦180度)。左目・右目で完全に同じ形状を使う。
+    const geoHalf = new THREE.SphereGeometry(500, 60, 40, Math.PI/2, Math.PI, 0, Math.PI);
+    geoHalf.scale(-1,1,1);
+
+    texL = new THREE.VideoTexture(video);
+    texL.minFilter = THREE.LinearFilter;
+    texL.format = THREE.RGBFormat;
+    texL.repeat.set(0.5,1); texL.offset.set(0,0);
+
+    texR = new THREE.VideoTexture(video);
+    texR.minFilter = THREE.LinearFilter;
+    texR.format = THREE.RGBFormat;
+    texR.repeat.set(0.5,1); texR.offset.set(0.5,0);
+
+    const meshL = new THREE.Mesh(geoHalf, new THREE.MeshBasicMaterial({map: texL}));
+    meshL.layers.set(1);
+    const meshR = new THREE.Mesh(geoHalf, new THREE.MeshBasicMaterial({map: texR}));
+    meshR.layers.set(2);
+
+    scene.add(meshL, meshR);
+
+    buildMenu();
+
+    renderer = new THREE.WebGLRenderer({antialias:true, alpha:false});
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    stageEl.appendChild(renderer.domElement);
+    resize();
+    window.addEventListener('resize', resize);
+  }
+
+  function buildMenu(){
+    menuCanvas = document.createElement('canvas');
+    menuCanvas.width = CANVAS_W; menuCanvas.height = CANVAS_H;
+    menuCtx = menuCanvas.getContext('2d');
+    menuTexture = new THREE.CanvasTexture(menuCanvas);
+
+    const geo = new THREE.PlaneGeometry(MENU_W, MENU_H);
+    const matVisible = new THREE.MeshBasicMaterial({map: menuTexture, transparent:true, side: THREE.DoubleSide});
+
+    const planeL = new THREE.Mesh(geo, matVisible);
+    planeL.layers.set(1);
+    const planeR = new THREE.Mesh(geo, matVisible);
+    planeR.layers.set(2);
+
+    // レイキャスト専用の当たり判定面(どちらのカメラのレイヤーにも含めず、描画はされない)
+    hitPlane = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({visible:false}));
+
+    menuGroup = new THREE.Group();
+    menuGroup.add(planeL, planeR, hitPlane);
+    menuGroup.visible = false;
+    scene.add(menuGroup);
+
+    drawMenu();
+  }
+
+  function openMenu(){
+    const fwd = new THREE.Vector3(0,0,-1).applyQuaternion(cameraGroup.quaternion);
+    fwd.y = 0; // 上下は水平に固定し、見やすい高さに出す
+    if(fwd.lengthSq() < 0.0001) fwd.set(0,0,-1);
+    fwd.normalize();
+    menuGroup.position.copy(fwd.multiplyScalar(MENU_DIST));
+    menuGroup.lookAt(0,0,0);
+    menuGroup.visible = true;
+    hoverRegion = null;
+    reticleL.classList.add('show');
+    reticleR.classList.add('show');
+  }
+  function closeMenu(){
+    menuGroup.visible = false;
+    hoverRegion = null;
+    reticleL.classList.remove('show');
+    reticleR.classList.remove('show');
+  }
+  function toggleMenu(){
+    if(menuGroup.visible) closeMenu(); else openMenu();
+  }
+
+  function regionAt(u, v){
+    const px = u * CANVAS_W;
+    const py = (1 - v) * CANVAS_H;
+    // 閉じるボタン
+    const cx=940, cy=64, cr=40;
+    if(Math.hypot(px-cx, py-cy) < cr) return {region:'close'};
+    // センター再設定ボタン
+    const rx=820, ry=64, rr=40;
+    if(Math.hypot(px-rx, py-ry) < rr) return {region:'recenter'};
+    // 再生/一時停止ボタン
+    const px2=150, py2=CANVAS_H/2, pr=76;
+    if(Math.hypot(px-px2, py-py2) < pr) return {region:'play'};
+    // シークバー
+    const bx=300, by=CANVAS_H/2-40, bw=680, bh=80;
+    if(px>=bx && px<=bx+bw && py>=by && py<=by+bh){
+      return {region:'seek', frac: Math.min(1,Math.max(0,(px-bx)/bw))};
+    }
+    return null;
+  }
+
+  function drawMenu(){
+    const ctx = menuCtx;
+    ctx.clearRect(0,0,CANVAS_W,CANVAS_H);
+
+    // 背景パネル
+    roundRect(ctx, 8,8,CANVAS_W-16,CANVAS_H-16,28);
+    ctx.fillStyle = 'rgba(10,10,14,0.82)';
+    ctx.fill();
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx.stroke();
+
+    const dwellFrac = hoverRegion ? Math.min(1, (performance.now()-hoverStart) / DWELL_MS) : 0;
+
+    // 閉じるボタン
+    drawCircleButton(ctx, 940,64,40, hoverRegion==='close'?dwellFrac:0, '✕', 22);
+
+    // センター再設定ボタン
+    drawCircleButton(ctx, 820,64,40, hoverRegion==='recenter'?dwellFrac:0, '⟲', 26);
+
+    // 再生/一時停止ボタン
+    const paused = video.paused;
+    drawCircleButton(ctx, 150,CANVAS_H/2,76, hoverRegion==='play'?dwellFrac:0, paused?'▶':'❚❚', 46);
+
+    // シークバー
+    const bx=300, by=CANVAS_H/2-40, bw=680, bh=80;
+    roundRect(ctx, bx,by,bw,bh,16);
+    ctx.fillStyle = 'rgba(255,255,255,0.12)';
+    ctx.fill();
+
+    const dur = video.duration || 0;
+    const cur = dur ? video.currentTime/dur : 0;
+    roundRect(ctx, bx,by,bw*cur,bh,16);
+    ctx.fillStyle = 'rgba(95,179,163,0.9)';
+    ctx.fill();
+
+    // 注視中のシーク位置プレビュー
+    if(hoverRegion === 'seek'){
+      const hx = bx + hoverFrac*bw;
+      ctx.fillStyle = 'rgba(255,255,255,0.9)';
+      ctx.fillRect(hx-2, by-10, 4, bh+20);
+
+      // 注視の滞留(ドウェル)を示すリング的なバー
+      ctx.fillStyle = 'rgba(255,255,255,0.55)';
+      ctx.fillRect(bx, by+bh+10, bw*dwellFrac, 6);
+    }
+
+    // 時間表示
+    ctx.fillStyle = '#e9e9ee';
+    ctx.font = '28px -apple-system, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(fmtTime(video.currentTime)+' / '+fmtTime(dur), bx, by+bh+54);
+
+    menuTexture.needsUpdate = true;
+  }
+
+  function drawCircleButton(ctx, x,y,r, dwellFrac, label, fontSize){
+    ctx.beginPath();
+    ctx.arc(x,y,r,0,Math.PI*2);
+    ctx.fillStyle = 'rgba(255,255,255,0.12)';
+    ctx.fill();
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+    ctx.stroke();
+
+    if(dwellFrac > 0){
+      ctx.beginPath();
+      ctx.moveTo(x,y);
+      ctx.arc(x,y,r, -Math.PI/2, -Math.PI/2 + dwellFrac*Math.PI*2);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(95,179,163,0.75)';
+      ctx.fill();
+    }
+
+    ctx.fillStyle = '#fff';
+    ctx.font = fontSize+'px -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, x, y+2);
+  }
+
+  function roundRect(ctx,x,y,w,h,r){
+    ctx.beginPath();
+    ctx.moveTo(x+r,y);
+    ctx.arcTo(x+w,y,x+w,y+h,r);
+    ctx.arcTo(x+w,y+h,x,y+h,r);
+    ctx.arcTo(x,y+h,x,y,r);
+    ctx.arcTo(x,y,x+w,y,r);
+    ctx.closePath();
+  }
+
+  function fmtTime(t){
+    if(!isFinite(t)) t = 0;
+    const m = Math.floor(t/60), s = Math.floor(t%60);
+    return m+':'+String(s).padStart(2,'0');
+  }
+
+  const raycaster = new THREE.Raycaster();
+  function updateGaze(){
+    if(!menuGroup.visible) return;
+    const origin = new THREE.Vector3(0,0,0);
+    const dir = new THREE.Vector3(0,0,-1).applyQuaternion(cameraGroup.quaternion);
+    raycaster.set(origin, dir);
+    const hits = raycaster.intersectObject(hitPlane);
+
+    let hit = null;
+    if(hits.length && hits[0].uv){
+      hit = regionAt(hits[0].uv.x, hits[0].uv.y);
+    }
+
+    const now = performance.now();
+    if(!hit){
+      hoverRegion = null;
+    } else if(hit.region !== hoverRegion){
+      hoverRegion = hit.region;
+      hoverStart = now;
+      if(hit.frac !== undefined) hoverFrac = hit.frac;
+    } else {
+      if(hit.frac !== undefined){
+        if(Math.abs(hit.frac - hoverFrac) > 0.02){
+          hoverFrac = hit.frac;
+          hoverStart = now; // 大きく動いたら滞留をやり直す
+        }
+      }
+      if(now - hoverStart >= DWELL_MS){
+        triggerRegion(hoverRegion);
+        hoverStart = now + 1; // 連続発火を防ぐ小さな猶予
+        hoverRegion = null;
+      }
+    }
+  }
+
+  function triggerRegion(region){
+    if(region === 'close'){
+      closeMenu();
+    } else if(region === 'recenter'){
+      closeMenu();
+      startRecenterCountdown();
+    } else if(region === 'play'){
+      if(video.paused) video.play(); else video.pause();
+    } else if(region === 'seek'){
+      const dur = video.duration || 0;
+      if(dur) video.currentTime = hoverFrac * dur;
+    }
+  }
+
+  function resize(){
+    if(!renderer) return;
+    const w = window.innerWidth, h = window.innerHeight;
+    renderer.setSize(w,h);
+    cameraL.aspect = (w/2)/h; cameraL.updateProjectionMatrix();
+    cameraR.aspect = (w/2)/h; cameraR.updateProjectionMatrix();
+  }
+
+  // ---------- デバイスの向き → クォータニオン ----------
+  const zee = new THREE.Vector3(0,0,1);
+  const euler = new THREE.Euler();
+  const q0 = new THREE.Quaternion();
+  const q1 = new THREE.Quaternion(-Math.sqrt(0.5),0,0,Math.sqrt(0.5));
+
+  let alpha=0, beta=0, gamma=0, orient=0;
+  let yawOffset = 0; // センター再設定用のオフセット(度)
+
+  function startRecenterCountdown(){
+    let remaining = Math.round(RECENTER_COUNTDOWN_MS/1000); // 3
+    showHint('正面に向けてください… ' + remaining, 1100);
+    const timer = setInterval(()=>{
+      remaining--;
+      if(remaining > 0){
+        showHint('正面に向けてください… ' + remaining, 1100);
+      } else {
+        clearInterval(timer);
+        yawOffset = alpha; // 3秒後、その時点で向いている方向を正面(0度)にする
+        showHint('正面を再設定しました', 1500);
+      }
+    }, 1000);
+  }
+
+  function setQuaternion(quaternion, alphaDeg, betaDeg, gammaDeg, orientDeg){
+    const a = THREE.MathUtils.degToRad(alphaDeg);
+    const b = THREE.MathUtils.degToRad(betaDeg);
+    const g = THREE.MathUtils.degToRad(gammaDeg);
+    const o = THREE.MathUtils.degToRad(orientDeg);
+    euler.set(b, a, -g, 'YXZ');
+    quaternion.setFromEuler(euler);
+    quaternion.multiply(q1);
+    quaternion.multiply(q0.setFromAxisAngle(zee, -o));
+  }
+
+  function onDeviceOrientation(e){
+    alpha = e.alpha || 0;
+    beta = e.beta || 0;
+    gamma = e.gamma || 0;
+  }
+  function onOrientationChange(){
+    orient = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
+  }
+
+  // ---------- 頭振り(シェイク)検知 ----------
+  let yawHistory = [];
+  let lastShakeTime = 0;
+  function detectShake(now, quat){
+    const fwd = new THREE.Vector3(0,0,-1).applyQuaternion(quat);
+    const yaw = Math.atan2(fwd.x, -fwd.z);
+    yawHistory.push({t:now, yaw});
+    while(yawHistory.length && now - yawHistory[0].t > 900) yawHistory.shift();
+    if(yawHistory.length < 6) return false;
+
+    let reversals = 0, prevDelta = 0;
+    for(let i=1;i<yawHistory.length;i++){
+      let dd = yawHistory[i].yaw - yawHistory[i-1].yaw;
+      if(dd > Math.PI) dd -= Math.PI*2;
+      if(dd < -Math.PI) dd += Math.PI*2;
+      if(Math.abs(dd) > 0.02){
+        if(prevDelta !== 0 && Math.sign(dd) !== Math.sign(prevDelta)) reversals++;
+        prevDelta = dd;
+      }
+    }
+    const yaws = yawHistory.map(s=>s.yaw);
+    const amplitude = Math.max(...yaws) - Math.min(...yaws);
+
+    if(reversals >= 3 && amplitude > 0.15 && now - lastShakeTime > 1200){
+      lastShakeTime = now;
+      yawHistory = [];
+      return true;
+    }
+    return false;
+  }
+
+  function animate(){
+    if(!running) return;
+    requestAnimationFrame(animate);
+    setQuaternion(cameraGroup.quaternion, alpha - yawOffset, beta, gamma, orient);
+
+    const now = performance.now();
+    if(detectShake(now, cameraGroup.quaternion)){
+      toggleMenu();
+    }
+
+    if(menuGroup.visible){
+      updateGaze();
+      drawMenu();
+    }
+
+    const w = window.innerWidth, h = window.innerHeight;
+    renderer.setScissorTest(true);
+    renderer.setViewport(0,0,w/2,h);
+    renderer.setScissor(0,0,w/2,h);
+    renderer.render(scene, cameraL);
+    renderer.setViewport(w/2,0,w/2,h);
+    renderer.setScissor(w/2,0,w/2,h);
+    renderer.render(scene, cameraR);
+  }
+
+  async function start(){
+    if(!fileReady){ showError('先に動画ファイルを選んでください'); return; }
+
+    try{
+      if(typeof DeviceOrientationEvent !== 'undefined' &&
+         typeof DeviceOrientationEvent.requestPermission === 'function'){
+        const res = await DeviceOrientationEvent.requestPermission();
+        if(res !== 'granted'){
+          showError('ジャイロの許可が得られませんでした(iOSの設定を確認してください)');
+          return;
+        }
+      }
+    }catch(err){
+      showError('ジャイロ許可の取得に失敗しました: ' + err.message);
+      return;
+    }
+
+    window.addEventListener('deviceorientation', onDeviceOrientation);
+    window.addEventListener('orientationchange', onOrientationChange);
+    onOrientationChange();
+
+    startEl.style.display = 'none';
+    stageEl.style.display = 'block';
+
+    if(!renderer) buildScene();
+    resize();
+
+    try{ await video.play(); }catch(e){ showError('動画の再生に失敗しました: ' + e.message); }
+
+    try{
+      if(stageEl.requestFullscreen) await stageEl.requestFullscreen();
+    }catch(e){ /* フルスクリーン失敗は無視 */ }
+
+    try{
+      if(screen.orientation && screen.orientation.lock){
+        await screen.orientation.lock('landscape');
+      }
+    }catch(e){ /* 端末により非対応 */ }
+
+    running = true;
+    animate();
+
+    hintEl.classList.add('show');
+    setTimeout(()=>hintEl.classList.remove('show'), 4000);
+  }
+
+  function stop(){
+    running = false;
+    video.pause();
+    window.removeEventListener('deviceorientation', onDeviceOrientation);
+    window.removeEventListener('orientationchange', onOrientationChange);
+    stageEl.style.display = 'none';
+    startEl.style.display = 'flex';
+    if(document.fullscreenElement) document.exitFullscreen().catch(()=>{});
+    try{ if(screen.orientation && screen.orientation.unlock) screen.orientation.unlock(); }catch(e){}
+  }
+
+  enterBtn.addEventListener('click', start);
+  exitBtn.addEventListener('click', stop);
+})();
+</script>
+</body>
+</html>

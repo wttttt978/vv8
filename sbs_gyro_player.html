@@ -155,6 +155,10 @@
   let texL, texR;
   let running = false;
 
+  // 左右の映像の間に空ける隙間(px)。ゴーグルとレンズ間隔が合わないときはこの値を調整する。
+  // 値を大きくするほど左右の映像がさらに外側に離れる。
+  const CENTER_GAP_PX = 30;
+
   // メニュー関連
   const MENU_DIST = 2.2, MENU_W = 1.7, MENU_H = 0.95;
   const CANVAS_W = 1024, CANVAS_H = 576;
@@ -423,8 +427,10 @@
     if(!renderer) return;
     const w = window.innerWidth, h = window.innerHeight;
     renderer.setSize(w,h);
-    cameraL.aspect = (w/2)/h; cameraL.updateProjectionMatrix();
-    cameraR.aspect = (w/2)/h; cameraR.updateProjectionMatrix();
+    // 中央のスペーサー分を差し引いた、実際の片目分の幅
+    const halfW = (w - CENTER_GAP_PX) / 2;
+    cameraL.aspect = halfW/h; cameraL.updateProjectionMatrix();
+    cameraR.aspect = halfW/h; cameraR.updateProjectionMatrix();
   }
 
   // ---------- デバイスの向き → クォータニオン ----------
@@ -518,12 +524,18 @@
     }
 
     const w = window.innerWidth, h = window.innerHeight;
+    // 中央のスペーサー分を確保しつつ左右それぞれをレンダリング
+    const halfW = (w - CENTER_GAP_PX) / 2;
+    renderer.setScissorTest(false);
+    renderer.setViewport(0,0,w,h);
+    renderer.setClearColor(0x000000, 1);
+    renderer.clear();
     renderer.setScissorTest(true);
-    renderer.setViewport(0,0,w/2,h);
-    renderer.setScissor(0,0,w/2,h);
+    renderer.setViewport(0,0,halfW,h);
+    renderer.setScissor(0,0,halfW,h);
     renderer.render(scene, cameraL);
-    renderer.setViewport(w/2,0,w/2,h);
-    renderer.setScissor(w/2,0,w/2,h);
+    renderer.setViewport(w-halfW,0,halfW,h);
+    renderer.setScissor(w-halfW,0,halfW,h);
     renderer.render(scene, cameraR);
   }
 

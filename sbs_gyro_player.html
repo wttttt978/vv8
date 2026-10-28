@@ -18,12 +18,42 @@
     font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;
     overflow:hidden;}
 
+  /* スタート画面は横画面(ゴーグル装着時の向き)を基準に、左=説明 / 右=操作の2カラム */
   #start{
-    height:100%; display:flex; flex-direction:column; align-items:center; justify-content:center;
-    gap:22px; padding:24px; text-align:center;
+    height:100%; overflow-y:auto;
+    display:grid; grid-template-columns:1fr 1fr; align-items:center; gap:16px 36px;
+    padding:14px max(28px, env(safe-area-inset-right)) 14px max(28px, env(safe-area-inset-left));
   }
-  #start h1{font-size:17px; font-weight:600; margin:0; letter-spacing:.02em;}
-  #start p{font-size:13px; color:var(--dim); margin:0; line-height:1.6; max-width:320px;}
+  #start .info{text-align:left;}
+  #start .controls{display:flex; flex-direction:column; align-items:stretch; gap:10px;}
+  #start h1{font-size:17px; font-weight:600; margin:0 0 10px; letter-spacing:.02em;}
+  #start p{font-size:12px; color:var(--dim); margin:0; line-height:1.6;}
+  .file-btn{text-align:center;}
+  #filename{text-align:center;}
+  #enter{width:100%;}
+
+  .settings{
+    background:var(--panel); border:1px solid var(--line); border-radius:10px;
+    padding:10px 12px; display:flex; flex-direction:column; gap:8px;
+  }
+  .preset-row{display:flex; gap:8px; flex-wrap:wrap;}
+  .chip{
+    background:transparent; border:1px solid var(--line); color:var(--dim);
+    padding:6px 12px; border-radius:16px; font-size:12px; cursor:pointer;
+  }
+  .chip.active{border-color:var(--accent); color:var(--accent);}
+  .row{display:grid; grid-template-columns:104px 1fr 48px; align-items:center; gap:8px; font-size:12px;}
+  .row span{color:var(--dim);}
+  .row input[type=range]{width:100%; accent-color:var(--accent);}
+  .row output{text-align:right; color:var(--text); font-variant-numeric:tabular-nums;}
+
+  /* 縦持ちで開いた場合のフォールバック */
+  @media (orientation:portrait){
+    #start{display:flex; flex-direction:column; justify-content:center; gap:20px; padding:24px; text-align:center;}
+    #start .info{text-align:center;}
+    #start p{max-width:340px; margin:0 auto;}
+    #start .controls{width:100%; max-width:340px;}
+  }
 
   .file-btn{
     position:relative; overflow:hidden;
@@ -79,7 +109,7 @@
 <body>
 
 <div id="start">
-  <div>
+  <div class="info">
     <h1>SBS 180° ジャイロプレーヤー</h1>
     <p>VR180形式(左右分割・半球)の動画を選んで、ジャイロで見渡せます。<br>
     再生中に頭を素早く左右に振るとメニューが出ます。<br>
@@ -87,14 +117,27 @@
     正面がズレたら、メニュー内の⟲アイコンを見つめてください。3・2・1のカウントダウン後に再設定されます。</p>
   </div>
 
-  <label class="file-btn">
-    動画ファイルを選択
-    <input type="file" id="fileInput" accept="video/*">
-  </label>
-  <div id="filename"></div>
+  <div class="controls">
+    <label class="file-btn">
+      動画ファイルを選択
+      <input type="file" id="fileInput" accept="video/*">
+    </label>
+    <div id="filename"></div>
 
-  <button id="enter">ジャイロを許可してVR再生</button>
-  <div id="err"></div>
+    <div class="settings">
+      <div class="preset-row">
+        <button class="chip" type="button" data-preset="standard">標準</button>
+        <button class="chip" type="button" data-preset="sky">Wearality Sky</button>
+      </div>
+      <label class="row"><span>視野角(片目・水平)</span>
+        <input type="range" id="fovRange" min="80" max="160" step="1"><output id="fovOut"></output></label>
+      <label class="row"><span>左右の間隔</span>
+        <input type="range" id="gapRange" min="0" max="120" step="1"><output id="gapOut"></output></label>
+    </div>
+
+    <button id="enter">ジャイロを許可してVR再生</button>
+    <div id="err"></div>
+  </div>
 </div>
 
 <div id="stage">
@@ -155,9 +198,52 @@
   let texL, texR;
   let running = false;
 
-  // 左右の映像の間に空ける隙間(px)。ゴーグルとレンズ間隔が合わないときはこの値を調整する。
-  // 値を大きくするほど左右の映像がさらに外側に離れる。
-  const CENTER_GAP_PX = 30;
+  // ---------- ゴーグル設定(視野角・左右の間隔) ----------
+  // 視野角は「片目あたりの水平視野角」で指定する(three.jsのカメラは縦FOV指定なので resize() で換算)。
+  // Wearality Skyの150°は公称の水平視野角。左右間隔の初期値は仮の値なので、実機で合わせること。
+  const PRESETS = {
+    standard: {fov:100, gap:30},
+    sky:      {fov:150, gap:30}
+  };
+  const SETTINGS_KEY = 'sbsVrPlayerSettings';
+  let hFovDeg = PRESETS.standard.fov;
+  let centerGapPx = PRESETS.standard.gap;
+  const fovRange = document.getElementById('fovRange');
+  const gapRange = document.getElementById('gapRange');
+  const fovOut = document.getElementById('fovOut');
+  const gapOut = document.getElementById('gapOut');
+  const presetBtns = Array.from(document.querySelectorAll('.chip[data-preset]'));
+
+  function applySettings(save){
+    hFovDeg = +fovRange.value;
+    centerGapPx = +gapRange.value;
+    fovOut.textContent = hFovDeg + '°';
+    gapOut.textContent = centerGapPx + 'px';
+    presetBtns.forEach(b=>{
+      const p = PRESETS[b.dataset.preset];
+      b.classList.toggle('active', p.fov === hFovDeg && p.gap === centerGapPx);
+    });
+    if(renderer) resize();
+    if(save){
+      try{ localStorage.setItem(SETTINGS_KEY, JSON.stringify({fov:hFovDeg, gap:centerGapPx})); }catch(e){}
+    }
+  }
+  function loadSettings(){
+    let s = null;
+    try{ s = JSON.parse(localStorage.getItem(SETTINGS_KEY)); }catch(e){}
+    fovRange.value = (s && s.fov) || PRESETS.standard.fov;
+    gapRange.value = (s && s.gap !== undefined) ? s.gap : PRESETS.standard.gap;
+    applySettings(false);
+  }
+  fovRange.addEventListener('input', ()=>applySettings(true));
+  gapRange.addEventListener('input', ()=>applySettings(true));
+  presetBtns.forEach(b=>b.addEventListener('click', ()=>{
+    const p = PRESETS[b.dataset.preset];
+    fovRange.value = p.fov;
+    gapRange.value = p.gap;
+    applySettings(true);
+  }));
+  loadSettings();
 
   // メニュー関連
   const MENU_DIST = 2.2, MENU_W = 1.7, MENU_H = 0.95;
@@ -427,10 +513,17 @@
     if(!renderer) return;
     const w = window.innerWidth, h = window.innerHeight;
     renderer.setSize(w,h);
-    // 中央のスペーサー分を差し引いた、実際の片目分の幅
-    const halfW = (w - CENTER_GAP_PX) / 2;
-    cameraL.aspect = halfW/h; cameraL.updateProjectionMatrix();
-    cameraR.aspect = halfW/h; cameraR.updateProjectionMatrix();
+    // 中央の隙間を除いた、片目分の描画幅
+    const halfW = (w - centerGapPx) / 2;
+    const aspect = halfW / h;
+    // 水平FOV → three.jsが使う縦FOVに換算
+    const vFov = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(hFovDeg)/2) / aspect));
+    [cameraL, cameraR].forEach(c=>{
+      c.fov = vFov; c.aspect = aspect; c.updateProjectionMatrix();
+    });
+    // 照準点も各目の映像の中心に合わせる
+    reticleL.style.left = (halfW/2) + 'px';
+    reticleR.style.left = (w - halfW/2) + 'px';
   }
 
   // ---------- デバイスの向き → クォータニオン ----------
@@ -524,8 +617,8 @@
     }
 
     const w = window.innerWidth, h = window.innerHeight;
-    // 中央のスペーサー分を確保しつつ左右それぞれをレンダリング
-    const halfW = (w - CENTER_GAP_PX) / 2;
+    const halfW = (w - centerGapPx) / 2;
+    // 中央の隙間は黒で塗りつぶしてから、左右の目をそれぞれ描画
     renderer.setScissorTest(false);
     renderer.setViewport(0,0,w,h);
     renderer.setClearColor(0x000000, 1);
@@ -591,7 +684,7 @@
     window.removeEventListener('deviceorientation', onDeviceOrientation);
     window.removeEventListener('orientationchange', onOrientationChange);
     stageEl.style.display = 'none';
-    startEl.style.display = 'flex';
+    startEl.style.display = ''; // CSS側のレイアウト(横=2カラム/縦=1カラム)に戻す
     if(document.fullscreenElement) document.exitFullscreen().catch(()=>{});
     try{ if(screen.orientation && screen.orientation.unlock) screen.orientation.unlock(); }catch(e){}
   }
